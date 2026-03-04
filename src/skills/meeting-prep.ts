@@ -1,6 +1,6 @@
-import type { Playbook } from "../types.js";
+import type { Skill } from "../types.js";
 
-export const meetingPrep: Playbook = {
+export const meetingPrep: Skill = {
   id: "meeting-prep",
   name: "Meeting Preparation Brief",
   description:

@@ -6,13 +6,13 @@
  *
  * The server exposes these tools:
  *
- *   briefing_search_playbooks  — Find the right methodology for a query
+ *   briefing_search_skills     — Find the right methodology for a query
  *                                 (plugin equivalent: skill auto-matching)
  *
- *   briefing_list_playbooks    — Browse all available playbooks
+ *   briefing_list_skills       — Browse all available skills
  *                                 (plugin equivalent: /commands list)
  *
- *   briefing_execute           — Run the full playbook with hooks + agent loop
+ *   briefing_execute           — Run the full skill with hooks + agent loop
  *                                 (plugin equivalent: skill + hooks + subagent)
  *
  *   briefing_check_hooks       — Run hooks independently for any content
@@ -26,7 +26,7 @@
  *
  * Architecture notes:
  *   - Uses Streamable HTTP transport for remote deployment (or stdio for local)
- *   - Playbooks, hooks, and eval criteria are server-managed — updates ship
+ *   - Skills, hooks, and eval criteria are server-managed — updates ship
  *     instantly to all connected clients without reinstallation
  *   - Sampling with tools (SEP-1577) enables server-side agent loops using
  *     the client's LLM — no server-side API keys required
@@ -38,10 +38,10 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 
 import {
-  searchPlaybooks,
-  listPlaybooks,
-  getPlaybook,
-} from "./playbooks/index.js";
+  searchSkills,
+  listSkills,
+  getSkill,
+} from "./skills/index.js";
 import {
   runHooks,
   formatHookResults,
@@ -49,7 +49,7 @@ import {
   getModifications,
 } from "./hooks/index.js";
 import {
-  orchestratePlaybook,
+  orchestrateSkill,
   checkCompletionGates,
 } from "./sampling/agent-loop.js";
 import {
@@ -87,15 +87,15 @@ function getOrCreateSession(
   return ctx;
 }
 
-// ── Tool: Search playbooks ──────────────────────────────────────────────
+// ── Tool: Search skills ─────────────────────────────────────────────────
 // PLUGIN EQUIVALENT: Skill auto-matching by description
 
 server.registerTool(
-  "briefing_search_playbooks",
+  "briefing_search_skills",
   {
-    title: "Search Briefing Playbooks",
+    title: "Search Briefing Skills",
     description: `Search for the most relevant briefing methodology for a given query.
-Returns ranked playbook matches with relevance scores and matched tags.
+Returns ranked skill matches with relevance scores and matched tags.
 This should be the FIRST tool called — it identifies which expert-curated
 methodology to apply, just like a plugin skill auto-triggers based on context.
 
@@ -104,7 +104,7 @@ Args:
   - min_score (number): Minimum relevance score 0-1 (default: 0.05)
 
 Returns:
-  Ranked list of playbook matches with scores and reasoning.`,
+  Ranked list of skill matches with scores and reasoning.`,
     inputSchema: {
       query: z.string().min(1).describe("The user's briefing request or research question"),
       min_score: z.number().min(0).max(1).default(0.05).describe("Minimum relevance threshold"),
@@ -117,32 +117,32 @@ Returns:
     },
   },
   async ({ query, min_score }) => {
-    const matches = searchPlaybooks(query, min_score);
+    const matches = searchSkills(query, min_score);
 
     const output = matches.map((m) => ({
-      playbookId: m.playbook.id,
-      playbookName: m.playbook.name,
+      skillId: m.skill.id,
+      skillName: m.skill.name,
       relevanceScore: Math.round(m.relevanceScore * 100) / 100,
       matchedTags: m.matchedTags,
       reasoning: m.reasoning,
-      curator: m.playbook.curator,
-      stepCount: m.playbook.steps.length,
-      evalCriteriaCount: m.playbook.evalCriteria.length,
+      curator: m.skill.curator,
+      stepCount: m.skill.steps.length,
+      evalCriteriaCount: m.skill.evalCriteria.length,
     }));
 
     const text = matches.length > 0
       ? [
-          `Found ${matches.length} matching playbook(s) for: "${query}"`,
+          `Found ${matches.length} matching skill(s) for: "${query}"`,
           "",
           ...matches.map(
             (m, i) =>
-              `${i + 1}. **${m.playbook.name}** (score: ${Math.round(m.relevanceScore * 100)}%)` +
-              `\n   Curator: ${m.playbook.curator}` +
-              `\n   Steps: ${m.playbook.steps.length} | Eval criteria: ${m.playbook.evalCriteria.length}` +
+              `${i + 1}. **${m.skill.name}** (score: ${Math.round(m.relevanceScore * 100)}%)` +
+              `\n   Curator: ${m.skill.curator}` +
+              `\n   Steps: ${m.skill.steps.length} | Eval criteria: ${m.skill.evalCriteria.length}` +
               `\n   ${m.reasoning}`
           ),
         ].join("\n")
-      : `No playbooks matched the query "${query}" above the minimum score threshold.`;
+      : `No skills matched the query "${query}" above the minimum score threshold.`;
 
     return {
       content: [{ type: "text", text }],
@@ -151,13 +151,13 @@ Returns:
   }
 );
 
-// ── Tool: List playbooks ────────────────────────────────────────────────
+// ── Tool: List skills ───────────────────────────────────────────────────
 
 server.registerTool(
-  "briefing_list_playbooks",
+  "briefing_list_skills",
   {
-    title: "List All Briefing Playbooks",
-    description: `List all available briefing playbooks with their descriptions and metadata.
+    title: "List All Briefing Skills",
+    description: `List all available briefing skills with their descriptions and metadata.
 Use this to browse the full library of expert-curated methodologies.`,
     inputSchema: {},
     annotations: {
@@ -168,33 +168,33 @@ Use this to browse the full library of expert-curated methodologies.`,
     },
   },
   async () => {
-    const all = listPlaybooks();
+    const all = listSkills();
     const text = [
-      `## Available Briefing Playbooks (${all.length})`,
+      `## Available Briefing Skills (${all.length})`,
       "",
       ...all.map(
-        (pb) =>
-          `### ${pb.name}\n` +
-          `ID: \`${pb.id}\` | Curator: ${pb.curator} | Steps: ${pb.stepCount}\n` +
-          `${pb.description}`
+        (s) =>
+          `### ${s.name}\n` +
+          `ID: \`${s.id}\` | Curator: ${s.curator} | Steps: ${s.stepCount}\n` +
+          `${s.description}`
       ),
     ].join("\n\n");
 
     return {
       content: [{ type: "text", text }],
-      structuredContent: { playbooks: all },
+      structuredContent: { skills: all },
     };
   }
 );
 
-// ── Tool: Execute playbook ──────────────────────────────────────────────
+// ── Tool: Execute skill ─────────────────────────────────────────────────
 // PLUGIN EQUIVALENT: Skill execution + hooks + subagent orchestration
 
 server.registerTool(
   "briefing_execute",
   {
-    title: "Execute Briefing Playbook",
-    description: `Execute a selected playbook's methodology step by step.
+    title: "Execute Briefing Skill",
+    description: `Execute a selected skill's methodology step by step.
 
 This is the core orchestration tool. It:
 1. Validates the session via pre-hooks (like PreToolUse in plugins)
@@ -208,14 +208,14 @@ each step. In this prototype, it generates the sampling requests and
 demonstrates the hook pipeline.
 
 Args:
-  - playbook_id (string): ID of the playbook to execute
+  - skill_id (string): ID of the skill to execute
   - query (string): The user's original research question
   - session_id (string): Optional session ID for continuity
 
 Returns:
   Step-by-step execution plan with sampling requests and hook results.`,
     inputSchema: {
-      playbook_id: z.string().min(1).describe("Playbook ID from search results"),
+      skill_id: z.string().min(1).describe("Skill ID from search results"),
       query: z.string().min(1).describe("The user's briefing request"),
       session_id: z.string().optional().describe("Session ID for continuity"),
     },
@@ -226,29 +226,29 @@ Returns:
       openWorldHint: true,
     },
   },
-  async ({ playbook_id, query, session_id }) => {
-    const playbook = getPlaybook(playbook_id);
-    if (!playbook) {
+  async ({ skill_id, query, session_id }) => {
+    const skill = getSkill(skill_id);
+    if (!skill) {
       return {
         content: [{
           type: "text",
-          text: `Error: Playbook "${playbook_id}" not found. Use briefing_search_playbooks or briefing_list_playbooks to find available playbooks.`,
+          text: `Error: Skill "${skill_id}" not found. Use briefing_search_skills or briefing_list_skills to find available skills.`,
         }],
         isError: true,
       };
     }
 
     const context = getOrCreateSession(session_id, query);
-    context.selectedPlaybook = playbook;
+    context.selectedSkill = skill;
     context.query = query;
 
-    const stepResults = orchestratePlaybook(context);
+    const stepResults = orchestrateSkill(context);
 
     const textParts: string[] = [
-      `## Executing: ${playbook.name}`,
+      `## Executing: ${skill.name}`,
       `**Session:** ${context.sessionId}`,
       `**Query:** ${query}`,
-      `**Curator:** ${playbook.curator}`,
+      `**Curator:** ${skill.curator}`,
       "",
     ];
 
@@ -294,7 +294,7 @@ Returns:
       content: [{ type: "text", text: textParts.join("\n") }],
       structuredContent: {
         sessionId: context.sessionId,
-        playbookId: playbook.id,
+        skillId: skill.id,
         steps: stepResults.map((r) => ({
           stepId: r.stepId,
           stepTitle: r.stepTitle,
@@ -318,7 +318,7 @@ server.registerTool(
     description: `Run hook checks (pre, post, or stop) independently on any content.
 
 This exposes the hook engine directly, letting the agent validate content
-at any point — not just during playbook execution.
+at any point — not just during skill execution.
 
 Plugin equivalent: Manually triggering PreToolUse / PostToolUse hooks.
 
@@ -384,22 +384,22 @@ server.registerTool(
   "briefing_evaluate",
   {
     title: "Evaluate Brief Quality",
-    description: `Score a completed brief against the playbook's methodology-specific
+    description: `Score a completed brief against the skill's methodology-specific
 evaluation criteria. Returns a transparent scorecard with per-criterion
 scores, reasoning, and improvement suggestions.
 
-The eval criteria are curated by the playbook's subject-matter experts
+The eval criteria are curated by the skill's subject-matter experts
 and are continuously updated — a key advantage of server-hosted methodology.
 
 Args:
   - content (string): The completed brief text to evaluate
-  - session_id (string): Session ID (must have a selected playbook)
+  - session_id (string): Session ID (must have a selected skill)
 
 Returns:
   Evaluation scorecard with composite score and per-criterion breakdown.`,
     inputSchema: {
       content: z.string().min(1).describe("The completed brief text to evaluate"),
-      session_id: z.string().describe("Session ID with selected playbook"),
+      session_id: z.string().describe("Session ID with selected skill"),
     },
     annotations: {
       readOnlyHint: true,
@@ -419,11 +419,11 @@ Returns:
         isError: true,
       };
     }
-    if (!context.selectedPlaybook) {
+    if (!context.selectedSkill) {
       return {
         content: [{
           type: "text",
-          text: "Error: No playbook selected in this session. Run briefing_execute first.",
+          text: "Error: No skill selected in this session. Run briefing_execute first.",
         }],
         isError: true,
       };
@@ -449,7 +449,7 @@ server.registerTool(
     title: "Check Completion Readiness",
     description: `Run stop-hooks to verify the brief is ready for delivery.
 
-Checks that all playbook steps are complete and an eval has been run.
+Checks that all skill steps are complete and an eval has been run.
 This is the final quality gate before the brief is delivered to the user.
 
 Plugin equivalent: The Stop hook that validates task completeness

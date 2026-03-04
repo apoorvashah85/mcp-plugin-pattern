@@ -20,7 +20,7 @@ A remote MCP server solves all three. This repo demonstrates the pattern.
 
 | Plugin component | What it does | MCP equivalent in this repo |
 |---|---|---|
-| **Skills** (`skills/SKILL.md`) | Auto-triggered expert knowledge based on task context | `briefing_search_playbooks` — server-side relevance matching returns the right methodology |
+| **Skills** (`skills/SKILL.md`) | Auto-triggered expert knowledge based on task context | `briefing_search_skills` — server-side relevance matching returns the right methodology |
 | **Hooks** (`hooks/hooks.json`) | Quality gates that fire before/after tool use and at completion | `briefing_check_hooks` + hooks embedded in `briefing_execute` — pre/post/stop hooks that block, allow, or modify |
 | **Agents** (`agents/*.md`) | Subagents Claude invokes for specialised tasks | `briefing_execute` — server-side agent loop using sampling/createMessage (SEP-1577) |
 | **Commands** (`commands/*.md`) | User-invoked slash commands | Any MCP tool can serve as a command entry point |
@@ -46,8 +46,8 @@ A remote MCP server solves all three. This repo demonstrates the pattern.
 │  MCP SERVER (this repo)                             │
 │                                                     │
 │  ┌─────────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │  Playbooks   │  │  Hooks   │  │  Agent Loop   │  │
-│  │  (= Skills)  │  │  Engine  │  │  (= Agents)   │  │
+│  │  Skills     │  │  Hooks   │  │  Agent Loop   │  │
+│  │             │  │  Engine  │  │  (= Agents)   │  │
 │  │             │  │          │  │               │  │
 │  │  - Search   │  │  - Pre   │  │  - Sampling   │  │
 │  │  - Match    │  │  - Post  │  │    requests   │  │
@@ -67,21 +67,21 @@ A remote MCP server solves all three. This repo demonstrates the pattern.
 
 | Tool | Purpose | Plugin analogue |
 |---|---|---|
-| `briefing_search_playbooks` | Find the right methodology for a query | Skill auto-matching |
-| `briefing_list_playbooks` | Browse all available playbooks | Plugin discovery |
-| `briefing_execute` | Run full playbook with hooks + agent loop | Skill + hooks + subagent |
+| `briefing_search_skills` | Find the right methodology for a query | Skill auto-matching |
+| `briefing_list_skills` | Browse all available skills | Plugin discovery |
+| `briefing_execute` | Run full skill with hooks + agent loop | Skill + hooks + subagent |
 | `briefing_check_hooks` | Run quality hooks independently | Direct hook invocation |
 | `briefing_evaluate` | Score output against methodology criteria | No plugin equivalent |
 | `briefing_completion_gate` | Final readiness check | Stop hook |
 
-## Playbooks included
+## Skills included
 
 - **Executive Briefing** — Situation analysis → key findings → strategic implications → next steps
 - **Competitive Intelligence** — Competitor research → comparison matrix → SWOT → recommendations
 - **Meeting Preparation** — Stakeholder research → org context → discussion strategy → talking points
 - **Technical Assessment** — Capability audit → limitations → integration fit → risk matrix
 
-Each playbook includes methodology-specific evaluation criteria curated by a named working group.
+Each skill includes methodology-specific evaluation criteria curated by a named working group.
 
 ## Hook pipeline
 
@@ -89,15 +89,15 @@ The hook engine runs three types of quality gates:
 
 **Pre-hooks** (like `PreToolUse`):
 - `scope-validation` — Blocks execution if the query is too vague
-- `playbook-required` — Blocks if no playbook has been selected
+- `skill-required` — Blocks if no skill has been selected
 
 **Post-hooks** (like `PostToolUse`):
 - `source-quality-check` — Flags research steps that lack source attribution
-- `length-compliance` — Checks draft length against playbook targets
+- `length-compliance` — Checks draft length against skill targets
 - `analytical-balance` — Flags one-sided drafts that need counterpoints
 
 **Stop-hooks** (like `Stop`):
-- `completeness-gate` — Blocks delivery if any playbook steps are incomplete
+- `completeness-gate` — Blocks delivery if any skill steps are incomplete
 - `eval-required` — Requires an eval to be run before final delivery
 
 ## Quick start
@@ -151,10 +151,10 @@ Then configure your MCP client to connect to `http://localhost:3001/mcp`.
 User: "I need a competitive analysis of the top 3 LLM providers for our
        enterprise deployment decision."
 
-Agent: [calls briefing_search_playbooks]
+Agent: [calls briefing_search_skills]
        → Competitive Intelligence Brief scores highest (0.72)
 
-Agent: [calls briefing_execute with playbook_id="competitive-intel"]
+Agent: [calls briefing_execute with skill_id="competitive-intel"]
        → Pre-hooks pass
        → 5 steps prepared with sampling requests
        → Post-hooks flag: source quality check on step 2

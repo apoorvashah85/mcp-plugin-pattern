@@ -3,15 +3,15 @@
  *
  * This server demonstrates how a remote MCP server can replicate the
  * capabilities that Anthropic's plugin system provides locally:
- *   - Skills    → Playbooks  (auto-matched methodology templates)
+ *   - Skills    → Skills   (auto-matched methodology templates)
  *   - Hooks     → Hook engine (pre/post/stop quality gates)
  *   - Agents    → Sampling agent loop (server-side orchestration)
  *   - Evals     → Scoring engine (methodology-specific quality checks)
  */
 
-// ── Playbook types ──────────────────────────────────────────────────────
+// ── Skill types ──────────────────────────────────────────────────────
 
-export interface PlaybookStep {
+export interface SkillStep {
   id: string;
   title: string;
   instruction: string;
@@ -21,7 +21,7 @@ export interface PlaybookStep {
   requiresValidation?: boolean;
 }
 
-export interface Playbook {
+export interface Skill {
   id: string;
   name: string;
   description: string;
@@ -30,8 +30,8 @@ export interface Playbook {
   /** Who curated this methodology */
   curator: string;
   version: string;
-  steps: PlaybookStep[];
-  /** Eval criteria specific to this playbook */
+  steps: SkillStep[];
+  /** Eval criteria specific to this skill */
   evalCriteria: EvalCriterion[];
 }
 
@@ -46,7 +46,7 @@ export type HookDecision =
 
 export interface HookInput {
   timing: HookTiming;
-  /** The playbook step being checked, if applicable */
+  /** The skill step being checked, if applicable */
   stepId?: string;
   /** The content or context being validated */
   content: string;
@@ -99,7 +99,7 @@ export interface EvalScore {
 }
 
 export interface EvalResult {
-  playbookId: string;
+  skillId: string;
   compositeScore: number;
   scores: EvalScore[];
   suggestions: string[];
@@ -111,7 +111,7 @@ export interface EvalResult {
 export interface ExecutionContext {
   sessionId: string;
   query: string;
-  selectedPlaybook?: Playbook;
+  selectedSkill?: Skill;
   /** Accumulated content from each completed step */
   stepOutputs: Map<string, string>;
   hookResults: HookResult[];

@@ -1,7 +1,7 @@
 /**
  * Evaluation Engine
  *
- * Scores a completed brief against the playbook's methodology-specific
+ * Scores a completed brief against the skill's methodology-specific
  * evaluation criteria. Returns a transparent scorecard with per-criterion
  * scores, reasoning, and improvement suggestions.
  *
@@ -11,7 +11,7 @@
  *   evaluation type, or to the Stop hook that validates completeness.
  *
  * In production, the eval criteria would be curated by editorial boards
- * and subject-matter experts — the same way Chorus playbook evals work.
+ * and subject-matter experts — the same way Chorus skill evals work.
  */
 
 import type {
@@ -19,7 +19,7 @@ import type {
   EvalScore,
   EvalResult,
   ExecutionContext,
-  Playbook,
+  Skill,
 } from "../types.js";
 
 // ── Heuristic scorers ───────────────────────────────────────────────────
@@ -137,18 +137,18 @@ function scoreCriterion(
     criterionNameLower.includes("coverage") ||
     criterionNameLower.includes("completeness")
   ) {
-    // Check that all playbook steps produced output
-    const playbook = context.selectedPlaybook;
-    if (playbook) {
-      const completedSteps = playbook.steps.filter((s) =>
+    // Check that all skill steps produced output
+    const skill = context.selectedSkill;
+    if (skill) {
+      const completedSteps = skill.steps.filter((s) =>
         context.stepOutputs.has(s.id)
       ).length;
-      const ratio = completedSteps / playbook.steps.length;
+      const ratio = completedSteps / skill.steps.length;
       score = Math.round(ratio * 100);
-      reasoning = `${completedSteps}/${playbook.steps.length} steps completed.`;
+      reasoning = `${completedSteps}/${skill.steps.length} steps completed.`;
     } else {
       score = 50;
-      reasoning = "No playbook context available for completeness check.";
+      reasoning = "No skill context available for completeness check.";
     }
   } else if (
     criterionNameLower.includes("relevance") ||
@@ -184,24 +184,24 @@ function scoreCriterion(
 // ── Public API ──────────────────────────────────────────────────────────
 
 /**
- * Evaluate a completed brief against its playbook's criteria.
+ * Evaluate a completed brief against its skill's criteria.
  */
 export function evaluateBrief(
   content: string,
   context: ExecutionContext
 ): EvalResult {
-  const playbook = context.selectedPlaybook;
-  if (!playbook) {
-    throw new Error("No playbook in context — cannot evaluate.");
+  const skill = context.selectedSkill;
+  if (!skill) {
+    throw new Error("No skill in context — cannot evaluate.");
   }
 
-  const scores = playbook.evalCriteria.map((criterion) =>
+  const scores = skill.evalCriteria.map((criterion) =>
     scoreCriterion(criterion, content, context)
   );
 
   // Weighted composite score
   const compositeScore = Math.round(
-    playbook.evalCriteria.reduce((sum, criterion, i) => {
+    skill.evalCriteria.reduce((sum, criterion, i) => {
       return sum + scores[i].score * criterion.weight;
     }, 0)
   );
@@ -212,7 +212,7 @@ export function evaluateBrief(
     .map((s) => `[${s.criterionName}] ${s.reasoning}`);
 
   return {
-    playbookId: playbook.id,
+    skillId: skill.id,
     compositeScore,
     scores,
     suggestions:
@@ -229,7 +229,7 @@ export function evaluateBrief(
 export function formatEvalResult(result: EvalResult): string {
   const lines: string[] = [
     `## Evaluation Scorecard`,
-    `**Playbook:** ${result.playbookId}`,
+    `**Skill:** ${result.skillId}`,
     `**Composite Score:** ${result.compositeScore}/100`,
     `**Evaluated:** ${result.timestamp}`,
     "",

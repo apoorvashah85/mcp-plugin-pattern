@@ -1,6 +1,6 @@
-import type { Playbook } from "../types.js";
+import type { Skill } from "../types.js";
 
-export const technicalAssessment: Playbook = {
+export const technicalAssessment: Skill = {
   id: "technical-assessment",
   name: "Technical Assessment Brief",
   description:

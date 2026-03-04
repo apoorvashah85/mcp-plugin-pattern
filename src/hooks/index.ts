@@ -27,7 +27,7 @@ import type {
   HookResult,
   HookDecision,
   ExecutionContext,
-  PlaybookStep,
+  SkillStep,
 } from "../types.js";
 
 // ── Hook definitions ────────────────────────────────────────────────────
@@ -60,16 +60,16 @@ const scopeValidation: HookDefinition = {
   },
 };
 
-const playbookRequired: HookDefinition = {
-  name: "playbook-required",
+const skillRequired: HookDefinition = {
+  name: "skill-required",
   timing: "pre",
   matcher: "*",
   evaluate: (input) => {
-    if (!input.context.selectedPlaybook) {
+    if (!input.context.selectedSkill) {
       return {
         action: "block",
         reason:
-          "No playbook selected. Run playbook search first to identify the right methodology.",
+          "No skill selected. Run skill search first to identify the right methodology.",
       };
     }
     return { action: "allow" };
@@ -111,11 +111,11 @@ const lengthCheck: HookDefinition = {
   matcher: ["exec-5-draft", "ci-5-draft", "mp-5-draft", "ta-5-draft"],
   evaluate: (input) => {
     const wordCount = input.content.split(/\s+/).length;
-    const playbook = input.context.selectedPlaybook;
-    if (!playbook) return { action: "allow" };
+    const skill = input.context.selectedSkill;
+    if (!skill) return { action: "allow" };
 
     // Extract target length from the last step's instruction
-    const draftStep = playbook.steps[playbook.steps.length - 1];
+    const draftStep = skill.steps[skill.steps.length - 1];
     const lengthMatch = draftStep.instruction.match(/(\d+)-(\d+)\s*words/);
     if (!lengthMatch) return { action: "allow" };
 
@@ -180,11 +180,11 @@ const completenessGate: HookDefinition = {
   matcher: "*",
   evaluate: (input) => {
     const ctx = input.context;
-    const playbook = ctx.selectedPlaybook;
-    if (!playbook) return { action: "allow" };
+    const skill = ctx.selectedSkill;
+    if (!skill) return { action: "allow" };
 
     // Check that every step has produced output
-    const missingSteps = playbook.steps.filter(
+    const missingSteps = skill.steps.filter(
       (step) => !ctx.stepOutputs.has(step.id)
     );
 
@@ -219,7 +219,7 @@ const evalRequiredGate: HookDefinition = {
 const allHooks: HookDefinition[] = [
   // Pre-hooks
   scopeValidation,
-  playbookRequired,
+  skillRequired,
   // Post-hooks
   sourceCheck,
   lengthCheck,

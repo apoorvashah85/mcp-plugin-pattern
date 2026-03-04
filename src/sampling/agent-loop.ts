@@ -24,8 +24,8 @@
  */
 
 import type {
-  Playbook,
-  PlaybookStep,
+  Skill,
+  SkillStep,
   ExecutionContext,
   AgentLoopConfig,
   SamplingToolDef,
@@ -70,13 +70,13 @@ export const samplingTools: SamplingToolDef[] = [
 // ── Sampling request builder ────────────────────────────────────────────
 
 /**
- * Build a sampling/createMessage request for a single playbook step.
+ * Build a sampling/createMessage request for a single skill step.
  *
  * This returns the JSON-RPC params that would be sent to the client.
  * In production, the MCP server SDK handles the actual transport.
  */
 export function buildSamplingRequest(
-  step: PlaybookStep,
+  step: SkillStep,
   context: ExecutionContext,
   config: AgentLoopConfig
 ): Record<string, unknown> {
@@ -86,7 +86,7 @@ export function buildSamplingRequest(
     .join("\n\n---\n\n");
 
   const systemPrompt = [
-    `You are executing step "${step.title}" of the ${context.selectedPlaybook?.name ?? "unknown"} playbook.`,
+    `You are executing step "${step.title}" of the ${context.selectedSkill?.name ?? "unknown"} skill.`,
     `Original user query: "${context.query}"`,
     "",
     "Follow the step instruction precisely. Use the available tools if the step suggests them.",
@@ -153,7 +153,7 @@ export interface StepResult {
 }
 
 /**
- * Orchestrate the full playbook execution.
+ * Orchestrate the full skill execution.
  *
  * In a live deployment with full sampling support, this function would
  * actually send sampling/createMessage requests and process responses.
@@ -162,18 +162,18 @@ export interface StepResult {
  * to demonstrate the pattern. The actual LLM interaction would happen
  * via the SDK's sampling API.
  */
-export function orchestratePlaybook(
+export function orchestrateSkill(
   context: ExecutionContext,
   config: AgentLoopConfig = { maxIterations: 10 }
 ): StepResult[] {
-  const playbook = context.selectedPlaybook;
-  if (!playbook) {
-    throw new Error("No playbook selected in execution context.");
+  const skill = context.selectedSkill;
+  if (!skill) {
+    throw new Error("No skill selected in execution context.");
   }
 
   const results: StepResult[] = [];
 
-  for (const step of playbook.steps) {
+  for (const step of skill.steps) {
     // ── Pre-hooks ────────────────────────────────────────────────
     const preHooks = runHooks("pre", step.id, "", context);
     context.hookResults.push(...preHooks);

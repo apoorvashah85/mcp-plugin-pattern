@@ -27,24 +27,24 @@ This is a prototype MCP server that demonstrates how Anthropic's plugin system c
 
 | Plugin concept | MCP equivalent | Module |
 |---|---|---|
-| Skills (auto-triggered knowledge) | Playbooks with server-side relevance matching | `src/playbooks/` |
+| Skills (auto-triggered knowledge) | Skills with server-side relevance matching | `src/skills/` |
 | Hooks (PreToolUse/PostToolUse/Stop) | Hook engine with pre/post/stop quality gates | `src/hooks/index.ts` |
 | Agents/Subagents | Server-side agent loop via sampling/createMessage (SEP-1577) | `src/sampling/agent-loop.ts` |
 | Evals | Scoring engine with per-criterion heuristics | `src/evals/index.ts` |
 
 ### Request Flow
 
-1. Client calls `briefing_search_playbooks` → playbook registry scores all playbooks against query using tag/keyword matching
-2. Client calls `briefing_execute` with chosen playbook → orchestrator runs pre-hooks, builds sampling requests per step, runs post-hooks
-3. Client calls `briefing_evaluate` → heuristic scorer grades output against playbook-specific eval criteria
+1. Client calls `briefing_search_skills` → skill registry scores all skills against query using tag/keyword matching
+2. Client calls `briefing_execute` with chosen skill → orchestrator runs pre-hooks, builds sampling requests per step, runs post-hooks
+3. Client calls `briefing_evaluate` → heuristic scorer grades output against skill-specific eval criteria
 4. Client calls `briefing_completion_gate` → stop-hooks verify all steps complete and eval has been run
 
 ### Key Types (`src/types.ts`)
 
-- `ExecutionContext` — session state threading through the entire pipeline (query, selected playbook, step outputs, hook results, eval result)
-- `Playbook` / `PlaybookStep` — methodology templates with steps, tags, eval criteria
+- `ExecutionContext` — session state threading through the entire pipeline (query, selected skill, step outputs, hook results, eval result)
+- `Skill` / `SkillStep` — methodology templates with steps, tags, eval criteria
 - `HookDefinition` / `HookResult` — quality gates with allow/block/modify decisions
-- `EvalCriterion` / `EvalResult` — weighted scoring criteria per playbook
+- `EvalCriterion` / `EvalResult` — weighted scoring criteria per skill
 
 ### Transport
 

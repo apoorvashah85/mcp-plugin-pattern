@@ -1,6 +1,6 @@
-import type { Playbook } from "../types.js";
+import type { Skill } from "../types.js";
 
-export const competitiveIntel: Playbook = {
+export const competitiveIntel: Skill = {
   id: "competitive-intel",
   name: "Competitive Intelligence Brief",
   description:

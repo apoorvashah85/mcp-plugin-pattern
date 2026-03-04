@@ -1,6 +1,6 @@
-import type { Playbook } from "../types.js";
+import type { Skill } from "../types.js";
 
-export const executiveBrief: Playbook = {
+export const executiveBrief: Skill = {
   id: "executive-brief",
   name: "Executive Briefing",
   description:
