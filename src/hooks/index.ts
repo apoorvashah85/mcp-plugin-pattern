@@ -11,14 +11,12 @@
  *   PostToolUse hook  → post-hooks  (check quality after a step completes)
  *   Stop hook         → stop-hooks  (gate whether the agent should finish)
  *
- * In the plugin system, hooks fire locally via deterministic scripts or
- * prompt-based evaluation. Here, the MCP server runs the same logic
- * server-side—and can optionally use sampling to delegate evaluation
- * to the client's LLM for more nuanced checks.
+ * Post-hooks use LLM-powered evaluation via sampling/createMessage when
+ * available, falling back to deterministic heuristics otherwise.
+ * Pre-hooks and stop-hooks remain deterministic (structural checks).
  *
  * KEY INSIGHT: Because these hooks live on the server, the publisher can
  * update them at any time without requiring the user to reinstall anything.
- * This is the "remote hosted skills" pattern Alex Kasavin articulated.
  */
 
 import type {
@@ -29,6 +27,36 @@ import type {
   ExecutionContext,
   SkillStep,
 } from "../types.js";
+import { llmCall } from "../llm.js";
+
+// ── LLM hook helper ────────────────────────────────────────────────────
+
+/**
+ * Ask an LLM to evaluate content. Uses the llmCall abstraction layer
+ * (sampling → API fallback → simulation). Returns parsed JSON or null.
+ */
+async function llmEvaluate(
+  input: HookInput,
+  prompt: string
+): Promise<{ pass: boolean; reason: string } | null> {
+  const response = await llmCall(
+    {
+      systemPrompt: "You are a quality assurance evaluator. Respond ONLY with valid JSON, no markdown fencing.",
+      userMessage: prompt,
+      maxTokens: 300,
+    },
+    input.server
+  );
+
+  if (response.source === "simulation") return null;
+
+  try {
+    const cleaned = response.text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
+    return JSON.parse(cleaned) as { pass: boolean; reason: string };
+  } catch {
+    return null;
+  }
+}
 
 // ── Hook definitions ────────────────────────────────────────────────────
 
@@ -37,18 +65,17 @@ interface HookDefinition {
   timing: HookTiming;
   /** Which step IDs this hook applies to (glob "*" = all steps) */
   matcher: string | string[];
-  /** The check logic. Returns a decision. */
-  evaluate: (input: HookInput) => HookDecision;
+  /** The check logic. Returns a decision (may be async for LLM-powered hooks). */
+  evaluate: (input: HookInput) => HookDecision | Promise<HookDecision>;
 }
 
-// ── Pre-execution hooks ─────────────────────────────────────────────────
+// ── Pre-execution hooks (deterministic) ─────────────────────────────────
 
 const scopeValidation: HookDefinition = {
   name: "scope-validation",
   timing: "pre",
   matcher: "*",
   evaluate: (input) => {
-    // Block execution if the query is too vague
     if (input.context.query.split(/\s+/).length < 3) {
       return {
         action: "block",
@@ -76,16 +103,27 @@ const skillRequired: HookDefinition = {
   },
 };
 
-// ── Post-execution hooks ────────────────────────────────────────────────
+// ── Post-execution hooks (LLM-powered with heuristic fallback) ──────────
 
 const sourceCheck: HookDefinition = {
   name: "source-quality-check",
   timing: "post",
-  // Only fire after research/gather steps
   matcher: ["exec-2-gather", "ci-2-research", "mp-2-stakeholders", "ta-2-capabilities"],
-  evaluate: (input) => {
+  evaluate: async (input) => {
+    // Try LLM evaluation first
+    const llmResult = await llmEvaluate(
+      input,
+      `Evaluate whether this research output cites specific, named sources (URLs, publication names, author names, organization names). Content to evaluate:\n\n${input.content.slice(0, 2000)}\n\nRespond with JSON: {"pass": true/false, "reason": "brief explanation"}`
+    );
+
+    if (llmResult) {
+      return llmResult.pass
+        ? { action: "allow" }
+        : { action: "modify", modifications: `[LLM] ${llmResult.reason}` };
+    }
+
+    // Heuristic fallback
     const content = input.content.toLowerCase();
-    // Check if the output references any sources
     const hasSourceIndicators =
       content.includes("http") ||
       content.includes("source:") ||
@@ -107,14 +145,13 @@ const sourceCheck: HookDefinition = {
 const lengthCheck: HookDefinition = {
   name: "length-compliance",
   timing: "post",
-  // Fire after draft steps
+  // Stays deterministic — word count is precise, LLM adds no value
   matcher: ["exec-5-draft", "ci-5-draft", "mp-5-draft", "ta-5-draft"],
   evaluate: (input) => {
     const wordCount = input.content.split(/\s+/).length;
     const skill = input.context.selectedSkill;
     if (!skill) return { action: "allow" };
 
-    // Extract target length from the last step's instruction
     const draftStep = skill.steps[skill.steps.length - 1];
     const lengthMatch = draftStep.instruction.match(/(\d+)-(\d+)\s*words/);
     if (!lengthMatch) return { action: "allow" };
@@ -142,20 +179,25 @@ const biasCheck: HookDefinition = {
   name: "analytical-balance",
   timing: "post",
   matcher: ["exec-5-draft", "ci-5-draft", "ta-5-draft"],
-  evaluate: (input) => {
+  evaluate: async (input) => {
+    // Try LLM evaluation first
+    const llmResult = await llmEvaluate(
+      input,
+      `Evaluate whether this draft presents a balanced analysis with multiple perspectives, trade-offs, risks, and counterpoints — rather than being one-sided or purely positive. Content to evaluate:\n\n${input.content.slice(0, 2000)}\n\nRespond with JSON: {"pass": true/false, "reason": "brief explanation"}`
+    );
+
+    if (llmResult) {
+      return llmResult.pass
+        ? { action: "allow" }
+        : { action: "modify", modifications: `[LLM] ${llmResult.reason}` };
+    }
+
+    // Heuristic fallback
     const content = input.content.toLowerCase();
-    // Simple heuristic: check for hedging / contrasting language
     const balanceIndicators = [
-      "however",
-      "on the other hand",
-      "trade-off",
-      "risk",
-      "limitation",
-      "alternatively",
-      "concern",
-      "caveat",
-      "downside",
-      "weakness",
+      "however", "on the other hand", "trade-off", "risk",
+      "limitation", "alternatively", "concern", "caveat",
+      "downside", "weakness",
     ];
     const balanceCount = balanceIndicators.filter((indicator) =>
       content.includes(indicator)
@@ -172,7 +214,7 @@ const biasCheck: HookDefinition = {
   },
 };
 
-// ── Stop hooks (completion gates) ───────────────────────────────────────
+// ── Stop hooks (deterministic) ──────────────────────────────────────────
 
 const completenessGate: HookDefinition = {
   name: "completeness-gate",
@@ -183,7 +225,6 @@ const completenessGate: HookDefinition = {
     const skill = ctx.selectedSkill;
     if (!skill) return { action: "allow" };
 
-    // Check that every step has produced output
     const missingSteps = skill.steps.filter(
       (step) => !ctx.stepOutputs.has(step.id)
     );
@@ -217,14 +258,11 @@ const evalRequiredGate: HookDefinition = {
 // ── Hook registry ───────────────────────────────────────────────────────
 
 const allHooks: HookDefinition[] = [
-  // Pre-hooks
   scopeValidation,
   skillRequired,
-  // Post-hooks
   sourceCheck,
   lengthCheck,
   biasCheck,
-  // Stop-hooks
   completenessGate,
   evalRequiredGate,
 ];
@@ -245,20 +283,25 @@ function matchesStep(
  * Run all hooks for a given timing + step. Returns an array of results.
  * If any hook returns "block", execution should stop.
  * If any hook returns "modify", the modifications should be applied.
+ *
+ * Post-hooks may use LLM-powered evaluation via the server parameter.
  */
-export function runHooks(
+export async function runHooks(
   timing: HookTiming,
   stepId: string | undefined,
   content: string,
-  context: ExecutionContext
-): HookResult[] {
+  context: ExecutionContext,
+  server?: import("@modelcontextprotocol/sdk/server/index.js").Server
+): Promise<HookResult[]> {
   const applicableHooks = allHooks.filter(
     (h) => h.timing === timing && matchesStep(h.matcher, stepId)
   );
 
-  return applicableHooks.map((hook) => {
+  const results: HookResult[] = [];
+
+  for (const hook of applicableHooks) {
     const start = Date.now();
-    const decision = hook.evaluate({ timing, stepId, content, context });
+    const decision = await hook.evaluate({ timing, stepId, content, context, server });
     const durationMs = Date.now() - start;
 
     let reasoning: string;
@@ -274,14 +317,16 @@ export function runHooks(
         break;
     }
 
-    return {
+    results.push({
       hookName: hook.name,
       timing,
       decision,
       reasoning,
       durationMs,
-    };
-  });
+    });
+  }
+
+  return results;
 }
 
 /**

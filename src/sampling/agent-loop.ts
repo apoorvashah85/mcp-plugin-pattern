@@ -1,28 +1,23 @@
 /**
  * Server-Side Agent Loop via MCP Sampling
  *
- * This module demonstrates the SEP-1577 "sampling with tools" pattern from
+ * This module implements the SEP-1577 "sampling with tools" pattern from
  * the November 2025 MCP specification. The server orchestrates a multi-step
- * workflow by sending sampling requests (with tool definitions) back to the
- * client's LLM.
+ * workflow by sending LLM requests for each skill step.
+ *
+ * LLM strategy (via src/llm.ts):
+ *   1. MCP sampling/createMessage — when the client supports it
+ *   2. Anthropic API fallback — when ANTHROPIC_API_KEY is set
+ *   3. Simulation — descriptive placeholder text
  *
  * PLUGIN EQUIVALENT:
  *   Agents/Subagents → agents/ directory in plugin root
  *   Claude can invoke subagents automatically based on task context.
  *   Here, the MCP server creates an equivalent "inverted agent" pattern
  *   where the server defines the loop and the client provides the LLM.
- *
- * WHY THIS MATTERS FOR CHORUS:
- *   This is the architectural primitive that lets a remote MCP server
- *   deliver skills + hooks + agent logic as a single deployment —
- *   the "remote hosted skills" concept.
- *
- * NOTE: As of early 2026, not all MCP clients fully support sampling with
- * tools. The code below is written against the 2025-11-25 spec. For clients
- * that don't yet support sampling, the server falls back to returning
- * step-by-step instructions as structured tool responses.
  */
 
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type {
   Skill,
   SkillStep,
@@ -31,13 +26,10 @@ import type {
   SamplingToolDef,
 } from "../types.js";
 import { runHooks, hasBlockingDecision, getModifications, formatHookResults } from "../hooks/index.js";
+import { llmCall } from "../llm.js";
 
 // ── Tool definitions for sampling requests ──────────────────────────────
 
-/**
- * These are the tools the server includes in its sampling/createMessage
- * request. The client's LLM can invoke these during the server-side loop.
- */
 export const samplingTools: SamplingToolDef[] = [
   {
     name: "web_search",
@@ -67,20 +59,15 @@ export const samplingTools: SamplingToolDef[] = [
   },
 ];
 
-// ── Sampling request builder ────────────────────────────────────────────
+// ── Prompt builder ──────────────────────────────────────────────────────
 
 /**
- * Build a sampling/createMessage request for a single skill step.
- *
- * This returns the JSON-RPC params that would be sent to the client.
- * In production, the MCP server SDK handles the actual transport.
+ * Build the system prompt and user message for a single skill step.
  */
-export function buildSamplingRequest(
+function buildStepPrompt(
   step: SkillStep,
-  context: ExecutionContext,
-  config: AgentLoopConfig
-): Record<string, unknown> {
-  // Build context from prior step outputs
+  context: ExecutionContext
+): { systemPrompt: string; userMessage: string } {
   const priorContext = Array.from(context.stepOutputs.entries())
     .map(([stepId, output]) => `[Step: ${stepId}]\n${output}`)
     .join("\n\n---\n\n");
@@ -89,7 +76,7 @@ export function buildSamplingRequest(
     `You are executing step "${step.title}" of the ${context.selectedSkill?.name ?? "unknown"} skill.`,
     `Original user query: "${context.query}"`,
     "",
-    "Follow the step instruction precisely. Use the available tools if the step suggests them.",
+    "Follow the step instruction precisely.",
     "Produce structured, evidence-based output. Cite sources where applicable.",
   ].join("\n");
 
@@ -98,40 +85,11 @@ export function buildSamplingRequest(
     priorContext
       ? `\n## Context from prior steps\n${priorContext}`
       : "",
-    step.suggestedTools
-      ? `\n## Suggested tools for this step\nConsider using: ${step.suggestedTools.join(", ")}`
-      : "",
   ]
     .filter(Boolean)
     .join("\n");
 
-  // The sampling request params per 2025-11-25 spec
-  return {
-    messages: [
-      {
-        role: "user",
-        content: { type: "text", text: userMessage },
-      },
-    ],
-    systemPrompt,
-    modelPreferences: {
-      hints: (config.modelHints ?? []).map((name) => ({ name })),
-      intelligencePriority: config.intelligencePriority ?? 0.8,
-      speedPriority: config.speedPriority ?? 0.5,
-    },
-    // SEP-1577: Include tool definitions so the LLM can call them
-    tools: (step.suggestedTools ?? []).map((toolName) => {
-      const def = samplingTools.find((t) => t.name === toolName);
-      return def
-        ? {
-            name: def.name,
-            description: def.description,
-            inputSchema: def.inputSchema,
-          }
-        : null;
-    }).filter(Boolean),
-    maxTokens: 2000,
-  };
+  return { systemPrompt, userMessage };
 }
 
 // ── Agent loop orchestrator ─────────────────────────────────────────────
@@ -139,33 +97,32 @@ export function buildSamplingRequest(
 export interface StepResult {
   stepId: string;
   stepTitle: string;
-  /** The sampling request that would be sent (for transparency) */
-  samplingRequest: Record<string, unknown>;
+  /** The actual output from the LLM */
+  stepOutput: string;
   /** Hook results from pre-execution checks */
   preHookResults: string;
-  /** Hook results from post-execution checks (populated after sampling) */
+  /** Hook results from post-execution checks */
   postHookResults: string;
   /** Whether pre-hooks blocked this step */
   blocked: boolean;
   blockReason?: string;
   /** Modifications suggested by post-hooks */
   modifications: string[];
+  /** How the LLM output was produced */
+  llmSource: "sampling" | "anthropic-api" | "simulation";
 }
 
 /**
  * Orchestrate the full skill execution.
  *
- * In a live deployment with full sampling support, this function would
- * actually send sampling/createMessage requests and process responses.
- *
- * In this prototype, it generates the sampling requests and runs hooks
- * to demonstrate the pattern. The actual LLM interaction would happen
- * via the SDK's sampling API.
+ * For each step, sends an LLM request (via sampling or API fallback),
+ * then runs hooks on the real output.
  */
-export function orchestrateSkill(
+export async function orchestrateSkill(
+  server: Server,
   context: ExecutionContext,
   config: AgentLoopConfig = { maxIterations: 10 }
-): StepResult[] {
+): Promise<StepResult[]> {
   const skill = context.selectedSkill;
   if (!skill) {
     throw new Error("No skill selected in execution context.");
@@ -174,8 +131,8 @@ export function orchestrateSkill(
   const results: StepResult[] = [];
 
   for (const step of skill.steps) {
-    // ── Pre-hooks ────────────────────────────────────────────────
-    const preHooks = runHooks("pre", step.id, "", context);
+    // ── Pre-hooks (deterministic, no server needed) ────────────
+    const preHooks = await runHooks("pre", step.id, "", context);
     context.hookResults.push(...preHooks);
 
     if (hasBlockingDecision(preHooks)) {
@@ -186,29 +143,30 @@ export function orchestrateSkill(
       results.push({
         stepId: step.id,
         stepTitle: step.title,
-        samplingRequest: {},
+        stepOutput: "",
         preHookResults: formatHookResults(preHooks),
         postHookResults: "",
         blocked: true,
         blockReason: blockReasons.join("; "),
         modifications: [],
+        llmSource: "simulation",
       });
-      // Stop the loop — a pre-hook blocked execution
       break;
     }
 
-    // ── Build sampling request ───────────────────────────────────
-    const samplingRequest = buildSamplingRequest(step, context, config);
+    // ── Execute step via LLM ─────────────────────────────────────
+    const { systemPrompt, userMessage } = buildStepPrompt(step, context);
+    const llmResponse = await llmCall(
+      { systemPrompt, userMessage, maxTokens: 4000 },
+      server,
+      `[No LLM available for step "${step.title}". Set ANTHROPIC_API_KEY or use an MCP client with sampling support.]`
+    );
 
-    // ── Simulate step output (in production, this comes from sampling) ─
-    // For the prototype, we record that the step was "executed" so
-    // post-hooks and the completeness gate can evaluate properly.
-    const simulatedOutput = `[Output of step "${step.title}" would be produced by the client LLM via sampling/createMessage]`;
-    context.stepOutputs.set(step.id, simulatedOutput);
+    context.stepOutputs.set(step.id, llmResponse.text);
 
-    // ── Post-hooks ───────────────────────────────────────────────
+    // ── Post-hooks (LLM-powered when available) ──────────────────
     const postHooks = step.requiresValidation
-      ? runHooks("post", step.id, simulatedOutput, context)
+      ? await runHooks("post", step.id, llmResponse.text, context, server)
       : [];
     context.hookResults.push(...postHooks);
 
@@ -217,11 +175,12 @@ export function orchestrateSkill(
     results.push({
       stepId: step.id,
       stepTitle: step.title,
-      samplingRequest,
+      stepOutput: llmResponse.text,
       preHookResults: formatHookResults(preHooks),
       postHookResults: formatHookResults(postHooks),
       blocked: false,
       modifications,
+      llmSource: llmResponse.source,
     });
 
     // Check iteration limit
@@ -234,10 +193,10 @@ export function orchestrateSkill(
 /**
  * Run stop-hooks to determine if the brief is ready for delivery.
  */
-export function checkCompletionGates(
+export async function checkCompletionGates(
   context: ExecutionContext
-): { canComplete: boolean; hookResults: string; modifications: string[] } {
-  const stopHooks = runHooks(
+): Promise<{ canComplete: boolean; hookResults: string; modifications: string[] }> {
+  const stopHooks = await runHooks(
     "stop",
     undefined,
     context.draftContent ?? "",

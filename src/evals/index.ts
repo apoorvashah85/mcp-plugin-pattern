@@ -2,8 +2,8 @@
  * Evaluation Engine
  *
  * Scores a completed brief against the skill's methodology-specific
- * evaluation criteria. Returns a transparent scorecard with per-criterion
- * scores, reasoning, and improvement suggestions.
+ * evaluation criteria. Uses LLM-powered evaluation via sampling when
+ * available, falling back to deterministic heuristics otherwise.
  *
  * PLUGIN EQUIVALENT:
  *   There is no direct plugin equivalent — evals are a Chorus innovation.
@@ -14,6 +14,7 @@
  * and subject-matter experts — the same way Chorus skill evals work.
  */
 
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type {
   EvalCriterion,
   EvalScore,
@@ -21,17 +22,47 @@ import type {
   ExecutionContext,
   Skill,
 } from "../types.js";
+import { llmCall } from "../llm.js";
 
-// ── Heuristic scorers ───────────────────────────────────────────────────
+// ── LLM-powered scoring ─────────────────────────────────────────────────
+
+/**
+ * Score a criterion using the LLM abstraction layer (sampling → API → simulation).
+ * Returns null if no LLM is available or parsing fails.
+ */
+async function llmScoreCriterion(
+  server: Server | undefined,
+  criterion: EvalCriterion,
+  content: string
+): Promise<{ score: number; reasoning: string } | null> {
+  const response = await llmCall(
+    {
+      systemPrompt: "You are an expert evaluator scoring content quality. Be rigorous and specific. Respond ONLY with valid JSON, no markdown fencing.",
+      userMessage: `Score the following content on a scale of 0-100 for this criterion:\n\n**${criterion.name}**: ${criterion.description}\n\n---\n\nContent to evaluate:\n\n${content.slice(0, 3000)}\n\n---\n\nRespond ONLY with valid JSON (no markdown fencing): {"score": <0-100>, "reasoning": "<1-2 sentence explanation>"}`,
+      maxTokens: 300,
+    },
+    server
+  );
+
+  if (response.source === "simulation") return null;
+
+  try {
+    const cleaned = response.text.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
+    const parsed = JSON.parse(cleaned) as { score: number; reasoning: string };
+    const score = Math.max(0, Math.min(100, Math.round(parsed.score)));
+    return { score, reasoning: `[LLM] ${parsed.reasoning}` };
+  } catch {
+    return null;
+  }
+}
+
+// ── Heuristic fallback scorers ──────────────────────────────────────────
 
 /**
  * Score a single criterion using heuristic checks.
- *
- * In production with sampling support, these would be LLM-evaluated
- * using a sampling/createMessage call with the criterion as the prompt.
- * Here we use deterministic heuristics for demonstration.
+ * Used as fallback when LLM scoring is unavailable.
  */
-function scoreCriterion(
+function heuristicScoreCriterion(
   criterion: EvalCriterion,
   content: string,
   context: ExecutionContext
@@ -39,12 +70,9 @@ function scoreCriterion(
   const contentLower = content.toLowerCase();
   const wordCount = content.split(/\s+/).length;
 
-  let score = 50; // baseline
+  let score = 50;
   let reasoning = "";
 
-  // ── Generic quality signals ────────────────────────────────────
-
-  // Source attribution
   const sourceIndicators = [
     "according to", "source:", "http", "reported by",
     "published", "data from", "research by", "study",
@@ -53,7 +81,6 @@ function scoreCriterion(
     contentLower.includes(i)
   ).length;
 
-  // Analytical balance
   const balanceIndicators = [
     "however", "trade-off", "risk", "limitation",
     "alternatively", "on the other hand", "caveat",
@@ -63,7 +90,6 @@ function scoreCriterion(
     contentLower.includes(i)
   ).length;
 
-  // Actionability
   const actionIndicators = [
     "recommend", "next step", "action", "timeline",
     "owner", "priority", "implement", "invest",
@@ -73,7 +99,6 @@ function scoreCriterion(
     contentLower.includes(i)
   ).length;
 
-  // Structure
   const structureIndicators = [
     "##", "1.", "2.", "- ", "key finding",
     "summary", "implication", "conclusion",
@@ -81,8 +106,6 @@ function scoreCriterion(
   const structureCount = structureIndicators.filter((i) =>
     content.includes(i)
   ).length;
-
-  // ── Criterion-specific scoring ─────────────────────────────────
 
   const criterionNameLower = criterion.name.toLowerCase();
 
@@ -120,7 +143,6 @@ function scoreCriterion(
     criterionNameLower.includes("clarity") ||
     criterionNameLower.includes("concis")
   ) {
-    // Penalise if too long or too short
     if (wordCount >= 300 && wordCount <= 1000) {
       score = 80;
       reasoning = `Good length (${wordCount} words). Within expected range.`;
@@ -131,13 +153,11 @@ function scoreCriterion(
       score = 50;
       reasoning = `Potentially too long (${wordCount} words). Consider tightening.`;
     }
-    // Bonus for structure
     score = Math.min(score + structureCount * 5, 100);
   } else if (
     criterionNameLower.includes("coverage") ||
     criterionNameLower.includes("completeness")
   ) {
-    // Check that all skill steps produced output
     const skill = context.selectedSkill;
     if (skill) {
       const completedSteps = skill.steps.filter((s) =>
@@ -155,7 +175,6 @@ function scoreCriterion(
     criterionNameLower.includes("specific") ||
     criterionNameLower.includes("practical")
   ) {
-    // Heuristic: check for specificity via numbers, names, dates
     const numberMatches = content.match(/\d+/g) ?? [];
     const specificityScore = Math.min(numberMatches.length * 8, 60) + structureCount * 5;
     score = Math.min(specificityScore + 20, 100);
@@ -164,7 +183,6 @@ function scoreCriterion(
         ? `Good specificity (${numberMatches.length} quantitative references).`
         : `Could be more specific. Add data points and named examples.`;
   } else {
-    // Fallback: composite of all signals
     score = Math.min(
       (sourceCount * 8 + balanceCount * 10 + actionCount * 8 + structureCount * 5 + 20),
       100
@@ -185,19 +203,39 @@ function scoreCriterion(
 
 /**
  * Evaluate a completed brief against its skill's criteria.
+ * Uses LLM scoring via sampling when available, heuristic fallback otherwise.
  */
-export function evaluateBrief(
+export async function evaluateBrief(
   content: string,
-  context: ExecutionContext
-): EvalResult {
+  context: ExecutionContext,
+  server?: Server
+): Promise<EvalResult> {
   const skill = context.selectedSkill;
   if (!skill) {
     throw new Error("No skill in context — cannot evaluate.");
   }
 
-  const scores = skill.evalCriteria.map((criterion) =>
-    scoreCriterion(criterion, content, context)
-  );
+  const scores: EvalScore[] = [];
+
+  for (const criterion of skill.evalCriteria) {
+    // Try LLM scoring first
+    let llmResult: { score: number; reasoning: string } | null = null;
+    if (server) {
+      llmResult = await llmScoreCriterion(server, criterion, content);
+    }
+
+    if (llmResult) {
+      scores.push({
+        criterionId: criterion.id,
+        criterionName: criterion.name,
+        score: llmResult.score,
+        maxScore: 100,
+        reasoning: llmResult.reasoning,
+      });
+    } else {
+      scores.push(heuristicScoreCriterion(criterion, content, context));
+    }
+  }
 
   // Weighted composite score
   const compositeScore = Math.round(

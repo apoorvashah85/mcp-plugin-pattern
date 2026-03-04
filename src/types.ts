@@ -52,6 +52,8 @@ export interface HookInput {
   content: string;
   /** Full execution context for richer checks */
   context: ExecutionContext;
+  /** Server instance for LLM-powered evaluation via sampling */
+  server?: import("@modelcontextprotocol/sdk/server/index.js").Server;
 }
 
 export interface HookResult {
@@ -99,6 +101,7 @@ export interface EvalScore {
 }
 
 export interface EvalResult {
+  [key: string]: unknown;
   skillId: string;
   compositeScore: number;
   scores: EvalScore[];

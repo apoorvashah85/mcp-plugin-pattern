@@ -198,14 +198,13 @@ server.registerTool(
 
 This is the core orchestration tool. It:
 1. Validates the session via pre-hooks (like PreToolUse in plugins)
-2. Generates sampling requests for each step (server-side agent loop)
+2. Sends sampling/createMessage requests to the client's LLM for each step
 3. Runs post-hooks after each step to check quality (like PostToolUse)
-4. Returns the full execution plan with hook results
+4. Returns the full execution results with LLM output and hook results
 
-In a production deployment with full sampling support, this tool would
-use sampling/createMessage (SEP-1577) to have the client's LLM execute
-each step. In this prototype, it generates the sampling requests and
-demonstrates the hook pipeline.
+Uses SEP-1577 sampling to have the client's LLM execute each step.
+The client handles tool execution (e.g., web search) natively.
+Falls back to simulation if the client doesn't support sampling.
 
 Args:
   - skill_id (string): ID of the skill to execute
@@ -213,7 +212,7 @@ Args:
   - session_id (string): Optional session ID for continuity
 
 Returns:
-  Step-by-step execution plan with sampling requests and hook results.`,
+  Step-by-step execution results with LLM output, hook results, and modifications.`,
     inputSchema: {
       skill_id: z.string().min(1).describe("Skill ID from search results"),
       query: z.string().min(1).describe("The user's briefing request"),
@@ -242,7 +241,7 @@ Returns:
     context.selectedSkill = skill;
     context.query = query;
 
-    const stepResults = orchestrateSkill(context);
+    const stepResults = await orchestrateSkill(server.server, context);
 
     const textParts: string[] = [
       `## Executing: ${skill.name}`,
@@ -261,6 +260,11 @@ Returns:
       } else {
         textParts.push(`Pre-hooks:\n${result.preHookResults}`);
 
+        // Show the actual step output
+        if (result.stepOutput) {
+          textParts.push(`\n**Output** (${result.llmSource}):\n${result.stepOutput}`);
+        }
+
         if (result.postHookResults) {
           textParts.push(`\nPost-hooks:\n${result.postHookResults}`);
         }
@@ -271,12 +275,6 @@ Returns:
             textParts.push(`  - ${mod}`);
           }
         }
-
-        // Show the sampling request for transparency
-        textParts.push(
-          `\n<details><summary>Sampling request for this step</summary>\n` +
-          `\`\`\`json\n${JSON.stringify(result.samplingRequest, null, 2)}\n\`\`\`\n</details>`
-        );
       }
       textParts.push("");
     }
@@ -301,6 +299,7 @@ Returns:
           blocked: r.blocked,
           blockReason: r.blockReason,
           modifications: r.modifications,
+          llmSource: r.llmSource,
         })),
         blocked,
       },
@@ -355,7 +354,7 @@ Returns:
       };
     }
 
-    const results = runHooks(timing, step_id, content, context);
+    const results = await runHooks(timing, step_id, content, context, server.server);
     const blocked = hasBlockingDecision(results);
     const modifications = getModifications(results);
 
@@ -430,7 +429,7 @@ Returns:
     }
 
     context.draftContent = content;
-    const result = evaluateBrief(content, context);
+    const result = await evaluateBrief(content, context, server.server);
     context.evalResult = result;
 
     return {
@@ -482,7 +481,7 @@ Returns:
       };
     }
 
-    const gate = checkCompletionGates(context);
+    const gate = await checkCompletionGates(context);
 
     const text = gate.canComplete
       ? `✅ All completion gates passed. The brief is ready for delivery.\n\n${gate.hookResults}`

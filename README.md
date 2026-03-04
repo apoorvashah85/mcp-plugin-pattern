@@ -6,6 +6,21 @@ This prototype shows how a remote MCP server can replicate every major capabilit
 
 The domain is briefing document generation (executive briefs, competitive intel, meeting prep, technical assessments), chosen because it naturally requires curated methodologies, quality gates, multi-step orchestration, and structured evaluation — all the things that make plugins powerful.
 
+## LLM strategy and sampling support
+
+The server uses LLM calls for step execution, hook evaluation, and eval scoring. It tries three strategies in order:
+
+1. **MCP sampling** ([`sampling/createMessage`](https://modelcontextprotocol.io/specification/2025-11-25/client/sampling)) — the spec-correct approach where the client provides the LLM and no server-side API keys are needed. **As of March 2026, no major MCP client implements this** (not Claude Desktop, Claude Code, ChatGPT, or Cursor). The code is ready and will activate automatically when clients add support.
+
+2. **Anthropic API fallback** — if `ANTHROPIC_API_KEY` is set, the server calls the Claude API directly. **This is how you demo the server today.** Run with:
+   ```bash
+   ANTHROPIC_API_KEY=sk-ant-... npm start
+   ```
+
+3. **Simulation fallback** — if neither is available, returns descriptive placeholders. The full pipeline (skill matching, hooks, evals, completion gates) still runs, but on placeholder text.
+
+> **Why isn't sampling implemented by clients?** The [MCP sampling spec](https://modelcontextprotocol.io/specification/2025-11-25/client/sampling) is part of the 2025-11-25 protocol revision. Protocol specs are written ahead of implementation — this is normal for open standards. Security concerns ([prompt injection via sampling](https://unit42.paloaltonetworks.com/model-context-protocol-attack-vectors/)) and the human-in-the-loop requirement are likely factors in the rollout timeline. There is an [open feature request](https://github.com/anthropics/claude-code/issues/1785) on Claude Code for sampling support.
+
 ## Why this matters
 
 Plugins are excellent for local, per-user customisation. But they have a distribution problem:
@@ -22,9 +37,9 @@ A remote MCP server solves all three. This repo demonstrates the pattern.
 |---|---|---|
 | **Skills** (`skills/SKILL.md`) | Auto-triggered expert knowledge based on task context | `briefing_search_skills` — server-side relevance matching returns the right methodology |
 | **Hooks** (`hooks/hooks.json`) | Quality gates that fire before/after tool use and at completion | `briefing_check_hooks` + hooks embedded in `briefing_execute` — pre/post/stop hooks that block, allow, or modify |
-| **Agents** (`agents/*.md`) | Subagents Claude invokes for specialised tasks | `briefing_execute` — server-side agent loop using sampling/createMessage (SEP-1577) |
+| **Agents** (`agents/*.md`) | Subagents Claude invokes for specialised tasks | `briefing_execute` — server-side agent loop using LLM calls (sampling or API fallback) |
 | **Commands** (`commands/*.md`) | User-invoked slash commands | Any MCP tool can serve as a command entry point |
-| **Evals** (no plugin equivalent) | Quality scoring against methodology criteria | `briefing_evaluate` — transparent scorecard with per-criterion scores |
+| **Evals** (no plugin equivalent) | Quality scoring against methodology criteria | `briefing_evaluate` — LLM-powered scorecard with per-criterion scores |
 | **`.mcp.json`** | MCP server config bundled in plugin | The MCP server itself — connection config lives in the client |
 
 ## Architecture
@@ -36,7 +51,7 @@ A remote MCP server solves all three. This repo demonstrates the pattern.
 │  User query → Agent selects tools → Agent executes  │
 │       ▲                                      │      │
 │       │         sampling/createMessage        │      │
-│       │         (SEP-1577 agent loop)         │      │
+│       │         (or Anthropic API fallback)    │      │
 │       └──────────────────────────────────────┘      │
 │                        ▲  │                         │
 └────────────────────────┼──┼─────────────────────────┘
@@ -49,14 +64,14 @@ A remote MCP server solves all three. This repo demonstrates the pattern.
 │  │  Skills     │  │  Hooks   │  │  Agent Loop   │  │
 │  │             │  │  Engine  │  │  (= Agents)   │  │
 │  │             │  │          │  │               │  │
-│  │  - Search   │  │  - Pre   │  │  - Sampling   │  │
-│  │  - Match    │  │  - Post  │  │    requests   │  │
-│  │  - Select   │  │  - Stop  │  │  - Tool defs  │  │
+│  │  - Search   │  │  - Pre   │  │  - LLM calls  │  │
+│  │  - Match    │  │  - Post  │  │    per step   │  │
+│  │  - Select   │  │  - Stop  │  │  - 3 fallback │  │
 │  └─────────────┘  └──────────┘  └───────────────┘  │
 │                                                     │
 │  ┌─────────────┐  ┌──────────────────────────────┐  │
-│  │  Evals      │  │  Session store               │  │
-│  │  Engine     │  │  (execution context)         │  │
+│  │  Evals      │  │  LLM Abstraction (src/llm.ts)│  │
+│  │  Engine     │  │  sampling → API → simulation │  │
 │  └─────────────┘  └──────────────────────────────┘  │
 │                                                     │
 │  ALL of this updates centrally. No reinstallation.  │
@@ -87,16 +102,16 @@ Each skill includes methodology-specific evaluation criteria curated by a named 
 
 The hook engine runs three types of quality gates:
 
-**Pre-hooks** (like `PreToolUse`):
+**Pre-hooks** (deterministic):
 - `scope-validation` — Blocks execution if the query is too vague
 - `skill-required` — Blocks if no skill has been selected
 
-**Post-hooks** (like `PostToolUse`):
-- `source-quality-check` — Flags research steps that lack source attribution
-- `length-compliance` — Checks draft length against skill targets
-- `analytical-balance` — Flags one-sided drafts that need counterpoints
+**Post-hooks** (LLM-powered with heuristic fallback):
+- `source-quality-check` — LLM evaluates whether research cites specific named sources
+- `length-compliance` — Deterministic word count check against skill targets
+- `analytical-balance` — LLM evaluates whether the draft presents balanced perspectives
 
-**Stop-hooks** (like `Stop`):
+**Stop-hooks** (deterministic):
 - `completeness-gate` — Blocks delivery if any skill steps are incomplete
 - `eval-required` — Requires an eval to be run before final delivery
 
@@ -109,11 +124,14 @@ npm install
 # Build
 npm run build
 
-# Run via stdio (for Claude Code / Claude Desktop)
+# Run with Anthropic API (recommended for demo)
+ANTHROPIC_API_KEY=sk-ant-... npm start
+
+# Run without API key (simulation fallback)
 npm start
 
 # Run via HTTP (for remote deployment)
-npm run start:http
+ANTHROPIC_API_KEY=sk-ant-... npm run start:http
 ```
 
 ### Connect to Claude Desktop
@@ -125,7 +143,10 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
   "mcpServers": {
     "briefing": {
       "command": "node",
-      "args": ["/path/to/mcp-plugin-patterns/dist/index.js"]
+      "args": ["/path/to/mcp-plugin-patterns/dist/index.js"],
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-..."
+      }
     }
   }
 }
@@ -134,13 +155,13 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 ### Connect to Claude Code
 
 ```bash
-claude mcp add briefing node /path/to/mcp-plugin-patterns/dist/index.js
+claude mcp add briefing -- env ANTHROPIC_API_KEY=sk-ant-... node /path/to/mcp-plugin-patterns/dist/index.js
 ```
 
 ### Connect via HTTP (remote)
 
 ```bash
-TRANSPORT=http PORT=3001 npm start
+ANTHROPIC_API_KEY=sk-ant-... TRANSPORT=http PORT=3001 npm start
 ```
 
 Then configure your MCP client to connect to `http://localhost:3001/mcp`.
@@ -152,19 +173,17 @@ User: "I need a competitive analysis of the top 3 LLM providers for our
        enterprise deployment decision."
 
 Agent: [calls briefing_search_skills]
-       → Competitive Intelligence Brief scores highest (0.72)
+       → Competitive Intelligence Brief scores highest (0.64)
 
 Agent: [calls briefing_execute with skill_id="competitive-intel"]
-       → Pre-hooks pass
-       → 5 steps prepared with sampling requests
-       → Post-hooks flag: source quality check on step 2
-
-Agent: [executes each step, producing the brief]
+       → Pre-hooks pass (scope validated, skill selected)
+       → 5 steps execute via LLM (anthropic-api or sampling)
+       → Post-hooks: source quality check, length compliance, analytical balance
 
 Agent: [calls briefing_evaluate with the completed brief]
-       → Composite score: 71/100
-       → Low on "Specificity" — needs more data points
-       → Good on "Objectivity" — balanced analysis
+       → LLM scores each criterion (or heuristic fallback)
+       → Composite score: 78/100
+       → Suggestions for improvement
 
 Agent: [calls briefing_completion_gate]
        → ✅ All gates passed. Ready for delivery.
@@ -172,22 +191,18 @@ Agent: [calls briefing_completion_gate]
 
 ## Key spec references
 
-- [MCP Specification 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25) — Latest protocol version
-- [Sampling with Tools (SEP-1577)](https://modelcontextprotocol.io/specification/2025-11-25/client/sampling) — Server-side agent loops
-- [Tasks (SEP-1686)](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1686) — Async execution
+- [MCP Specification 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25) — Protocol version this server targets
+- [Sampling (client capability)](https://modelcontextprotocol.io/specification/2025-11-25/client/sampling) — Server-initiated LLM calls via `sampling/createMessage`
+- [Tasks (SEP-1686)](https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1686) — Async execution (future)
 - [Claude Code Plugins Reference](https://code.claude.com/docs/en/plugins-reference) — Plugin component specs
 - [Cowork Plugins](https://github.com/anthropics/knowledge-work-plugins) — Knowledge-work plugin examples
 
 ## What's next
 
-This prototype demonstrates the pattern. To move toward production:
-
-1. **Implement actual sampling calls** — Use the SDK's `server.requestSampling()` (or equivalent) to send `sampling/createMessage` with tool definitions to the client LLM
+1. **MCP sampling support** — When clients implement [`sampling/createMessage`](https://modelcontextprotocol.io/specification/2025-11-25/client/sampling), the server will use it automatically (no code changes needed). Track progress: [Claude Code #1785](https://github.com/anthropics/claude-code/issues/1785).
 2. **Add OAuth 2.1** — Required for institutional deployment per the MCP auth spec
 3. **Add Tasks support** — Long-running research sessions should use the Tasks primitive for async execution
-4. **Connect real data sources** — Replace simulated tool outputs with actual web search, document search, etc.
-5. **LLM-powered hooks** — Use sampling to make hook evaluations more nuanced (e.g., ask the LLM to judge analytical balance rather than keyword counting)
-6. **LLM-powered evals** — Same pattern — use sampling for richer, context-aware scoring
+4. **Server-side tool execution** — Implement the sampling tool loop (server executes tools, sends results back) per the spec's multi-turn tool flow
 
 ## License
 
